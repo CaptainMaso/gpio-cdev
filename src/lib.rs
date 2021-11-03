@@ -991,6 +991,11 @@ impl LineEventHandle {
     pub fn line(&self) -> &Line {
         &self.line
     }
+    
+    pub fn wait_for_event(&self, duration : Option<std::time::Duration>) -> std::io::Result<bool>
+    {
+        wait_for_readable(&self.file,duration)
+    }
 
     pub fn try_read_event(&mut self) -> std::io::Result<Option<LineEvent>>
     {
