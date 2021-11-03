@@ -562,6 +562,11 @@ impl Line {
         };
         ffi::gpio_get_lineevent_ioctl(self.chip.file.as_raw_fd(), &mut request)?;
 
+        unsafe {
+            let flags = libc::fcntl(request.fd, libc::F_GETFL, 0);
+            libc::fcntl(request.fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+
         Ok(LineEventHandle {
             line: self.clone(),
             file: unsafe { File::from_raw_fd(request.fd) },
@@ -987,22 +992,52 @@ impl LineEventHandle {
         &self.line
     }
 
+    pub fn try_read_event(&mut self) -> std::io::Result<Option<LineEvent>>
+    {
+        let ready = wait_for_readable(&self.file,Some(std::time::Duration::ZERO))?;
+        if !ready { return Ok(None); }
+
+        self.read_event()
+    }
+
+    pub fn read_event_timeout(&mut self, duration : std::time::Duration) -> std::io::Result<Option<LineEvent>>
+    {
+        let ready = wait_for_readable(&self.file,Some(duration))?;
+        if !ready { return Ok(None); }
+
+        self.read_event()
+    }
+
     /// Helper function which returns the line event if a complete event was read, Ok(None) if not
     /// enough data was read or the error returned by `read()`.
     pub(crate) fn read_event(&mut self) -> std::io::Result<Option<LineEvent>> {
-        let mut data: ffi::gpioevent_data = unsafe { mem::zeroed() };
-        let mut data_as_buf = unsafe {
+        let mut data: std::mem::MaybeUninit<ffi::gpioevent_data> = mem::MaybeUninit::uninit();
+        let data_as_buf = unsafe {
             slice::from_raw_parts_mut(
-                &mut data as *mut ffi::gpioevent_data as *mut u8,
+                data.as_mut_ptr() as *mut u8,
                 mem::size_of::<ffi::gpioevent_data>(),
             )
         };
-        let bytes_read = self.file.read(&mut data_as_buf)?;
-        if bytes_read != mem::size_of::<ffi::gpioevent_data>() {
-            Ok(None)
-        } else {
-            Ok(Some(LineEvent(data)))
-        }
+
+        let mut read_count = 0;
+        loop {
+            match self.file.read(&mut data_as_buf[read_count..])
+            {
+                Ok(read) => read_count += read,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock ) => 
+                {
+                    wait_for_readable(&self.file, None)?;
+                },
+                Err(e) => return Err(e),
+            }
+
+            if read_count >= mem::size_of::<ffi::gpioevent_data>()
+            {
+                break;
+            }
+        };
+        
+        Ok(Some(LineEvent(unsafe { data.assume_init() })))
     }
 }
 
@@ -1022,5 +1057,18 @@ impl Iterator for LineEventHandle {
             Ok(Some(event)) => Some(Ok(event)),
             Err(e) => Some(Err(e.into())),
         }
+    }
+}
+
+fn wait_for_readable(fd : &impl AsRawFd, timeout : Option<std::time::Duration>) -> std::result::Result<bool,std::io::Error>
+{
+    let pollfd = nix::poll::PollFd::new(fd.as_raw_fd(), nix::poll::PollFlags::POLLIN);
+    let timeout = timeout.map(|d| std::convert::TryInto::try_into(d.as_millis()).unwrap_or(i32::MAX)).unwrap_or(-1);
+    let res = nix::poll::poll(&mut [pollfd], timeout);
+    match res
+    {
+        Ok(v) if v == 0 => Ok(false),
+        Ok(_) => Ok(true),
+        Err(_) => Err(std::io::Error::from_raw_os_error(nix::errno::errno()))
     }
 }
