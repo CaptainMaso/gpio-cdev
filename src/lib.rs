@@ -1065,7 +1065,7 @@ impl Iterator for LineEventHandle {
     }
 }
 
-fn wait_for_readable(fd : &impl AsRawFd, timeout : Option<std::time::Duration>) -> std::result::Result<bool,std::io::Error>
+fn wait_for_readable(fd : &dyn AsRawFd, timeout : Option<std::time::Duration>) -> std::result::Result<bool,std::io::Error>
 {
     let pollfd = nix::poll::PollFd::new(fd.as_raw_fd(), nix::poll::PollFlags::POLLIN);
     let timeout = timeout.map(|d| std::convert::TryInto::try_into(d.as_millis()).unwrap_or(i32::MAX)).unwrap_or(-1);
