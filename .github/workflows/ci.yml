@@ -1,7 +1,9 @@
 on:
-  push:
-    branches: [ staging, trying, master ]
-  pull_request:
+  push: # Run CI for all branches except GitHub merge queue tmp branches
+    branches-ignore:
+    - "gh-readonly-queue/**"
+  pull_request: # Run CI for PRs on any branch
+  merge_group: # Run CI for the GitHub merge queue
 
 name: Build
 
@@ -16,24 +18,24 @@ jobs:
         rust: [stable]
         TARGET:
           - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
           - arm-unknown-linux-gnueabi
+          - arm-unknown-linux-gnueabihf
           - armv7-unknown-linux-gnueabihf
           - i686-unknown-linux-gnu
           - i686-unknown-linux-musl
-          - mips-unknown-linux-gnu
-          - mips64-unknown-linux-gnuabi64
-          - mips64el-unknown-linux-gnuabi64
-          - mipsel-unknown-linux-gnu
+          # - loongarch64-unknown-linux-gnu
           - powerpc-unknown-linux-gnu
           # - powerpc64-unknown-linux-gnu
           - powerpc64le-unknown-linux-gnu
+          - riscv64gc-unknown-linux-gnu
           - s390x-unknown-linux-gnu
           - x86_64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
 
         include:
           # MSRV
-          - rust: 1.46.0
+          - rust: 1.65.0
             TARGET: x86_64-unknown-linux-gnu
 
           # Test nightly but don't fail
@@ -107,10 +109,9 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.46.0
+          toolchain: 1.65.0
           components: clippy
 
       - uses: actions-rs/clippy-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
