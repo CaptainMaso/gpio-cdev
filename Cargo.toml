@@ -9,11 +9,13 @@ readme = "README.md"
 categories = ["embedded", "hardware-support", "os", "os::unix-apis"]
 keywords = ["linux", "gpio", "gpiochip", "embedded"]
 license = "MIT OR Apache-2.0"
-edition = "2018"
+edition = "2021"
 
 [features]
-default = []
+default = ["uapi-v2"]
 async-tokio = ["tokio", "futures"]
+uapi-v1 = []
+uapi-v2 = []
 
 [[example]]
 name = "async_tokio"
@@ -22,16 +24,19 @@ required-features = ["async-tokio"]
 [dependencies]
 bitflags = "2.4"
 libc = "0.2"
-nix = { version = "0.27", features = ["ioctl"] }
+nix = { version = "0.28", features = ["ioctl"] }
 tokio = { version = "1", features = ["io-std", "net"], optional = true }
 futures = { version = "0.3", optional = true }
+thiserror = "1.0.58"
+heapless = "0.8.0"
+bstr = "1.9.1"
 
 [dev-dependencies]
 quicli = "0.4"
 structopt = "0.3"
 anyhow = "1.0"
 tokio = { version = "1", features = ["io-std", "rt-multi-thread", "macros", "net"] }
-nix = { version = "0.27", features = ["ioctl", "poll"] }
+nix = { version = "0.28", features = ["ioctl", "poll"] }
 
 [package.metadata.docs.rs]
 # To build locally:

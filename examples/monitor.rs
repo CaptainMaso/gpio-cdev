@@ -6,10 +6,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use gpio_cdev::*;
+use gpio_cdev::{chip::AsGpioChip, line::options::LineOptions, *};
 use nix::poll::*;
 use quicli::prelude::*;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::{
+    os::unix::io::{AsRawFd, FromRawFd, OwnedFd},
+    path::PathBuf,
+};
 use structopt::StructOpt;
 
 type PollEventFlags = nix::poll::PollFlags;
@@ -17,28 +20,20 @@ type PollEventFlags = nix::poll::PollFlags;
 #[derive(Debug, StructOpt)]
 struct Cli {
     /// The gpiochip device (e.g. /dev/gpiochip0)
-    chip: String,
+    chip: PathBuf,
     /// The offset of the GPIO lines for the provided chip
     lines: Vec<u32>,
 }
 
 fn do_main(args: Cli) -> anyhow::Result<()> {
-    let mut chip = Chip::new(args.chip)?;
+    let mut chip = Chip::open(&args.chip)?;
 
-    // Get event handles for each line to monitor.
-    let mut evt_handles: Vec<LineEventHandle> = args
-        .lines
-        .into_iter()
-        .map(|off| {
-            let line = chip.get_line(off).unwrap();
-            line.events(
-                LineRequestFlags::INPUT,
-                EventRequestFlags::BOTH_EDGES,
-                "monitor",
-            )
-            .unwrap()
-        })
-        .collect();
+    let chip = chip.get_all_lines(
+        "monitor",
+        LineOptions::build()
+            .input()
+            .with_edge_detect(line::options::EdgeDetect::Both),
+    );
 
     // Create a vector of file descriptors for polling
     let ownedfd: Vec<OwnedFd> = evt_handles
