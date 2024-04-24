@@ -232,19 +232,49 @@ bitflags! {
 
 #[repr(C)]
 pub(crate) struct gpio_line_event {
-    timestamp_ns: u64,
-    id: LineEventId,
-    offset: u32,
-    seqno: u32,
-    line_seqno: u32,
+    pub(crate) timestamp_ns: u64,
+    pub(crate) id: LineEventId,
+    pub(crate) offset: u32,
+    pub(crate) seqno: u32,
+    pub(crate) line_seqno: u32,
     /* Space reserved for future use. */
     _padding: [MaybeUninit<u32>; 6],
 }
 
+impl gpio_line_event {
+    #[inline(always)]
+    pub const fn zeroed() -> Self {
+        Self {
+            timestamp_ns: 0,
+            id: LineEventId::empty(),
+            offset: 0,
+            seqno: 0,
+            line_seqno: 0,
+            _padding: [MaybeUninit::zeroed(); 6],
+        }
+    }
+
+    /// # Safety:
+    ///
+    /// Caller must ensure that the bytes are valid to be converted to this type
+    pub const unsafe fn from_bytes(bytes: [u8; std::mem::size_of::<Self>()]) -> Self {
+        let buf_ptr = (&bytes as *const _) as *const Self;
+        let data = unsafe { std::ptr::read_unaligned(buf_ptr) };
+        data
+    }
+}
+
+impl Default for gpio_line_event {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
 ioctl_readwrite!(gpio_get_line, 0xB4, 0x07, gpio_line_request);
 
-ioctl_readwrite!(gpio_get_lineinfo, 0xB4, 0x05, gpio_line_info);
-ioctl_readwrite!(gpio_get_lineinfo_watch, 0xB4, 0x06, gpio_line_info);
+ioctl_readwrite!(gpio_get_line_info, 0xB4, 0x05, gpio_line_info);
+ioctl_readwrite!(gpio_get_line_info_watch, 0xB4, 0x06, gpio_line_info);
 
 ioctl_readwrite!(gpio_line_set_config, 0xB4, 0x0D, gpio_line_config);
 

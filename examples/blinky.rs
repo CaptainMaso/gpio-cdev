@@ -6,8 +6,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use gpio_cdev::{Chip, LineRequestFlags};
+use gpio_cdev::line::options::LineOptions;
+use gpio_cdev::line::values::LineValue;
+use gpio_cdev::Chip;
 use quicli::prelude::*;
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
@@ -15,7 +18,7 @@ use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 struct Cli {
     /// The gpiochip device (e.g. /dev/gpiochip0)
-    chip: String,
+    chip: PathBuf,
     /// The offset of the GPIO line for the provided chip
     line: u32,
     /// Period in milliseconds
@@ -24,22 +27,20 @@ struct Cli {
     duration_ms: u64,
 }
 
-fn do_main(args: Cli) -> std::result::Result<(), gpio_cdev::Error> {
-    let mut chip = Chip::new(args.chip)?;
+fn do_main(args: Cli) -> std::io::Result<()> {
+    let chip = Chip::open(&args.chip)?;
 
     // NOTE: we set the default value to the desired state so
     // setting it separately is not required
-    let handle = chip
-        .get_line(args.line)?
-        .request(LineRequestFlags::OUTPUT, 1, "blinky")?;
+    let mut handle = chip.open_line("blinky", LineOptions::OUTPUT, args.line)?;
 
     let duration = Duration::from_millis(args.duration_ms);
     let start_time = Instant::now();
     while start_time.elapsed() < duration {
         sleep(Duration::from_millis(args.period_ms));
-        handle.set_value(0)?;
+        handle.write(LineValue::Inactive)?;
         sleep(Duration::from_millis(args.period_ms));
-        handle.set_value(1)?;
+        handle.write(LineValue::Inactive)?;
     }
 
     Ok(())

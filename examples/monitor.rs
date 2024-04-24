@@ -28,7 +28,7 @@ struct Cli {
 fn do_main(args: Cli) -> anyhow::Result<()> {
     let mut chip = Chip::open(&args.chip)?;
 
-    let chip = chip.get_all_lines(
+    let chip = chip.open_all_lines(
         "monitor",
         LineOptions::build()
             .input()

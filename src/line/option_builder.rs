@@ -1,7 +1,5 @@
 use std::marker::PhantomData;
 
-use bitflags::Flags;
-
 use crate::uapi;
 
 use super::options::*;

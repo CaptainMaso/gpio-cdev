@@ -1,215 +1,187 @@
-use std::{io::Result, mem::MaybeUninit, time::Duration};
-
-use crate::{
-    fixed_str::FixedStr,
-    uapi::{
-        self,
-        v2::{gpio_line_attribute, LineFlags},
-    },
+use std::{
+    fs::File, io::Result, mem::MaybeUninit, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd}, task::Poll, time::Duration
 };
 
+use crate::{
+    chip::ChipRef,
+    fixed_str::FixedStr,
+    line::event::LineEvent,
+    uapi::{self, v2::LineFlags},
+    Chip,
+};
+
+mod event;
+mod info;
 mod option_builder;
 pub mod options;
+pub mod set;
+pub mod values;
 
-#[derive(Debug, Clone)]
-pub struct LineInfo {
-    name: FixedStr<{ uapi::v2::GPIO_MAX_NAME_SIZE }>,
+pub use info::LineInfo;
+pub use set::LineSet;
+pub use values::{LineValues, LineValuesRef};
+
+use set::LineSetRef;
+use values::MaskedBits;
+
+pub struct Lines<const N: usize> {
+    chip: Chip,
+    line_fd: File,
     consumer: FixedStr<{ uapi::v2::GPIO_MAX_NAME_SIZE }>,
-    offset: u32,
-    flags: LineFlags,
-    attrs: heapless::Vec<LineAttribute, { uapi::v2::GPIO_LINE_NUM_ATTRS_MAX }>,
+    offsets: LineSet<N>,
 }
 
-impl LineInfo {
-    const fn empty() -> Self {
-        Self {
-            name: FixedStr::empty(),
-            consumer: FixedStr::empty(),
-            offset: 0,
-            flags: LineFlags::empty(),
-            attrs: heapless::Vec::new(),
-        }
-    }
-
-    pub const fn new_get(offset: u32) -> Self {
-        Self {
-            name: FixedStr::empty(),
-            consumer: FixedStr::empty(),
-            offset,
-            flags: LineFlags::empty(),
-            attrs: heapless::Vec::new(),
-        }
-    }
-
-    pub fn new_set(
-        offset: u32,
-        name: &str,
+impl<const N: usize> Lines<N> {
+    pub(crate) fn new(
+        chip: ChipRef<'_>,
         consumer: &str,
-        flags: LineFlags,
-        debounce: Option<Debounce>,
+        offsets: impl set::AsLineSet,
+        options: impl options::AsLineOptions,
     ) -> Result<Self> {
-        let name = FixedStr::new(name)?;
         let consumer = FixedStr::new(consumer)?;
-        let debounce = debounce.map(LineAttribute::Debounce);
+        let offsets: LineSet<N> = offsets.as_line_set()?;
+        unsafe {
+            let mut req = uapi::v2::gpio_line_request::zeroed();
 
-        let attrs = [debounce].into_iter().flatten().collect();
+            let (n_lines, lines) = offsets.to_api_v2();
+            req.num_lines = n_lines;
+            req.offsets = lines;
+            req.config.flags = options.build_v2();
+            req.consumer = consumer.into_byte_array();
 
-        Ok(Self {
-            name,
-            consumer,
-            offset,
-            flags,
-            attrs,
-        })
-    }
+            let _ = uapi::v2::gpio_get_line(chip.as_raw_fd(), &mut req)?;
 
-    pub(crate) fn from_v2(info: uapi::v2::gpio_line_info) -> Result<Self> {
-        let name = FixedStr::from_byte_array(info.name)?;
-        let consumer = FixedStr::from_byte_array(info.name)?;
-        let attrs = info
-            .attrs
-            .into_iter()
-            .take(info.num_attrs as usize)
-            .map(|a| unsafe { a.assume_init() })
-            .map(LineAttribute::new_v2)
-            .collect::<Result<_>>()?;
+            let line_fd = std::fs::File::from_raw_fd(req.fd);
 
-        Ok(Self {
-            name,
-            consumer,
-            offset: info.offset,
-            flags: info.flags,
-            attrs,
-        })
-    }
+            let chip = chip.try_to_owned()?;
 
-    pub(crate) fn into_v2(self) -> uapi::v2::gpio_line_info {
-        let num_attrs = self.attrs.len() as u32;
-        let mut attrs = [MaybeUninit::zeroed(); uapi::v2::GPIO_LINE_NUM_ATTRS_MAX];
-
-        for (r, w) in self.attrs.into_iter().zip(attrs.iter_mut()) {
-            w.write(r.into_v2());
-        }
-
-        uapi::v2::gpio_line_info {
-            name: self.name.into_byte_array(),
-            consumer: self.consumer.into_byte_array(),
-            offset: self.offset,
-            num_attrs,
-            flags: self.flags,
-            attrs,
-            _padding: [0; 4],
+            Ok(Self {
+                chip,
+                line_fd,
+                offsets,
+                consumer,
+            })
         }
     }
 
-    pub fn flags(&self) -> LineFlags {
-        self.attrs
+    pub fn consumer(&self) -> &str {
+        &self.consumer
+    }
+
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    pub fn lines(&self) -> impl Iterator<Item = Result<(u32, LineInfo)>> + '_ {
+        self.offsets
             .iter()
-            .filter_map(|f| match f {
-                LineAttribute::Flags(f) => Some(f),
-                _ => None,
-            })
             .copied()
-            .fold(None::<LineFlags>, |acc, f| match acc {
-                Some(acc) => Some(acc.union(f)),
-                None => Some(f),
+            .map(|offset| Ok((offset, self.chip.line_info(offset)?)))
+    }
+
+    pub fn line_info(&self, offset: u32) -> Result<LineInfo> {
+        let _idx = self.offsets.find_idx(offset).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "Offset not found in Lines")
+        })?;
+        self.chip.line_info(offset)
+    }
+
+    pub fn read(&self) -> Result<values::LineValuesRef<'_>> {
+        unsafe {
+            let mask = self.offsets.mask();
+            let mut data = uapi::v2::gpio_line_values { bits: 0, mask };
+            let _ = uapi::v2::gpio_line_get_values(self.line_fd.as_raw_fd(), &mut data)?;
+            let bits = MaskedBits {
+                bits: data.bits,
+                mask: data.mask,
+            };
+
+            Ok(values::LineValuesRef {
+                offsets: &self.offsets,
+                values: bits,
             })
-            .unwrap_or(self.flags)
+        }
     }
-}
 
-impl Default for LineInfo {
-    fn default() -> Self {
-        Self::empty()
+    pub fn write(&mut self, values: impl values::AsValues) -> Result<values::LineValuesRef<'_>> {
+        let offset_len = self.offsets.len();
+        let mask = 2u64
+            .checked_pow(offset_len as u32)
+            .map(|p| p - 1)
+            .unwrap_or(u64::MAX);
+
+        let values = values.values(&self.offsets)?;
+
+        let mut data = uapi::v2::gpio_line_values {
+            bits: values.bits,
+            mask: values.mask & mask,
+        };
+
+        unsafe {
+            let _ = uapi::v2::gpio_line_set_values(self.line_fd.as_raw_fd(), &mut data)?;
+        }
+
+        let values = MaskedBits {
+            bits: data.bits,
+            mask: data.mask,
+        };
+
+        Ok(values::LineValuesRef {
+            offsets: &self.offsets,
+            values,
+        })
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum LineAttribute {
-    Flags(LineFlags),
-    Values(LineValues),
-    /// The debounce duration in micro-seconds
-    Debounce(Debounce),
-}
+    /// Helper function which returns the line event if a complete event was read, Ok(None) if not
+    /// enough data was read or the error returned by `read()`.
+    pub(crate) fn try_read_event(&mut self) -> Poll<Result<Option<LineEvent>>> {
+        use std::io::Read;
 
-impl LineAttribute {
-    pub(crate) fn new_v2(attr: uapi::v2::gpio_line_attribute) -> Result<Self> {
-        let res = unsafe {
-            match attr.id {
-                uapi::v2::LineAttrId::FLAGS => Self::Flags(attr.attribute.flags),
-                uapi::v2::LineAttrId::OUTPUT_VALUES => Self::Values(LineValues {
-                    bits: attr.attribute.values,
-                    mask: u64::MAX,
-                }),
-                uapi::v2::LineAttrId::DEBOUNCE => Self::Debounce(Debounce {
-                    d: attr.attribute.debounce_period,
-                }),
-                invalid => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        format!("Invalid gpio line attribute ID: 0x{invalid:X}"),
-                    ))
+        let mut buf = [0; std::mem::size_of::<uapi::v2::gpio_line_event>()];
+        {
+            let mut buf_ptr = &mut buf[..];
+
+            loop {
+                match self.line_fd.read(&mut buf_ptr) {
+                    Ok(read) => buf_ptr = &mut buf_ptr[read..],
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock) => {
+                        return Poll::Pending;
+                    }
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::Interrupted) => (),
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
+
+                if buf_ptr.is_empty() {
+                    break;
                 }
             }
-        };
-        Ok(res)
-    }
-
-    pub(crate) const fn into_v2(self) -> uapi::v2::gpio_line_attribute {
-        let (id, attribute) = match self {
-            LineAttribute::Flags(flags) => (
-                uapi::v2::LineAttrId::FLAGS,
-                uapi::v2::gpio_line_attribute_union { flags },
-            ),
-            LineAttribute::Values(v) => (
-                uapi::v2::LineAttrId::OUTPUT_VALUES,
-                uapi::v2::gpio_line_attribute_union { values: v.bits },
-            ),
-            LineAttribute::Debounce(d) => (
-                uapi::v2::LineAttrId::DEBOUNCE,
-                uapi::v2::gpio_line_attribute_union {
-                    debounce_period: d.d,
-                },
-            ),
-        };
-
-        uapi::v2::gpio_line_attribute {
-            id,
-            _padding: 0,
-            attribute,
         }
+
+        let data = unsafe { uapi::v2::gpio_line_event::from_bytes(buf) };
+
+        Ok(Some(data))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LineValues {
-    bits: u64,
-    mask: u64,
-}
+fn wait_for_readable(
+    fd: std::os::fd::BorrowedFd<'_>,
+    timeout: Option<std::time::Duration>,
+) -> std::result::Result<bool, std::io::Error> {
+    let pollfd = nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN);
+    let timeout = timeout
+        .as_ref()
+        .map(Duration::as_millis)
+        .map(std::convert::TryInto::try_into)
+        .transpose()
+        .unwrap_or(Some(nix::poll::PollTimeout::MAX));
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Debounce {
-    d: u32,
-}
-
-impl Debounce {
-    pub fn new(d: Duration) -> Result<Self> {
-        let d = d.as_micros().try_into().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Debounce period must be at most 4294 seconds",
-            )
-        })?;
-        Ok(Self { d })
-    }
-
-    pub const unsafe fn new_unchecked(d: Duration) -> Self {
-        Self {
-            d: d.as_micros() as u32,
-        }
-    }
-
-    pub const fn as_duration(&self) -> Duration {
-        Duration::from_micros(self.d as u64)
+    if nix::poll::poll(&mut [pollfd], timeout)? == 0 {
+        Ok(false)
+    } else {
+        Ok(true)
     }
 }

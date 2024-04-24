@@ -6,6 +6,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use std::path::PathBuf;
+
 use gpio_cdev::{Chip, LineRequestFlags};
 use quicli::prelude::*;
 use structopt::StructOpt;
@@ -13,7 +15,7 @@ use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 struct Cli {
     /// The gpiochip device (e.g. /dev/gpiochip0)
-    chip: String,
+    chip: PathBuf,
     /// The offset of the GPIO line for the provided chip
     line: u32,
     /// The value to write
@@ -21,7 +23,7 @@ struct Cli {
 }
 
 fn do_main(args: Cli) -> std::result::Result<(), gpio_cdev::Error> {
-    let mut chip = Chip::new(args.chip)?;
+    let mut chip = Chip::open(&args.chip)?;
 
     // NOTE: we set the default value to the desired state so
     // setting it separately is not required. The LineHandle
@@ -31,7 +33,7 @@ fn do_main(args: Cli) -> std::result::Result<(), gpio_cdev::Error> {
     // then the LineHandle will be immediately dropped after
     // request returns and the pin will appear to do nothing.
     let _handle =
-        chip.get_line(args.line)?
+        chip.open_line(args.line)?
             .request(LineRequestFlags::OUTPUT, args.value, "driveoutput")?;
 
     println!("Output being driven... Enter to exit");

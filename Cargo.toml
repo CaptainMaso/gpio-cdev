@@ -30,6 +30,7 @@ futures = { version = "0.3", optional = true }
 thiserror = "1.0.58"
 heapless = "0.8.0"
 bstr = "1.9.1"
+itertools = "0.12.1"
 
 [dev-dependencies]
 quicli = "0.4"
